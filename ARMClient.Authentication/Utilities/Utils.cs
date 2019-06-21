@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading.Tasks;
 using ARMClient.Authentication.AADAuthentication;
 using ARMClient.Authentication.Contracts;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace ARMClient.Authentication.Utilities
@@ -107,7 +108,8 @@ namespace ARMClient.Authentication.Utilities
                 {
                     if (Constants.CSMResources.Contains(cacheInfo.Resource))
                     {
-                        var claims = ParseClaims(cacheInfo.AccessToken);
+                        var jwt = JsonConvert.DeserializeObject<JsonWebToken>(DecodeAccessToken(cacheInfo.AccessToken));
+
                         if (string.IsNullOrWhiteSpace(cacheInfo.DisplayableId))
                         {
                             client.DefaultRequestHeaders.Add("x-ms-principal-name", cacheInfo.DisplayableId);
@@ -115,9 +117,15 @@ namespace ARMClient.Authentication.Utilities
 
                         client.DefaultRequestHeaders.Add("x-ms-client-tenant-id", cacheInfo.TenantId);
                         client.DefaultRequestHeaders.Add("x-ms-client-object-id", cacheInfo.ObjectId);
-                        if (claims["unique_name"] != null)
+                        if (jwt.UniqueName != null)
                         {
-                            client.DefaultRequestHeaders.Add("x-ms-client-principal-name", claims["unique_name"].Value<string>());
+                            client.DefaultRequestHeaders.Add("x-ms-client-principal-name", jwt.UniqueName);
+                        }
+
+                        var principalId = GetPrincipalId(jwt);
+                        if (principalId != null)
+                        {
+                            client.DefaultRequestHeaders.Add("x-ms-client-principal-id", principalId);
                         }
 
                         if (headers != null && headers.ContainsKey("usertoken"))
@@ -211,7 +219,7 @@ namespace ARMClient.Authentication.Utilities
             }
         }
 
-        public static JObject ParseClaims(string accessToken)
+        public static string DecodeAccessToken(string accessToken)
         {
             var base64 = accessToken.Split('.')[1];
 
@@ -222,8 +230,64 @@ namespace ARMClient.Authentication.Utilities
                 base64 += new string('=', 4 - mod4);
             }
 
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
-            return JObject.Parse(json);
+            return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+        }
+
+        // PUsing PUIDs for Azure:
+        // https://microsoft.sharepoint.com/:w:/t/azureresourcemanagerteam/Eafm5WMT0eRDvhaNJ3LNAssB6PCKAR0ON969Nq1qgQDcqA?e=9vVJfF
+        private static string GetPrincipalId(JsonWebToken token)
+        {
+            string principalId = null;
+
+            if (token.Idp == null || token.Idp == token.Iss)
+            {
+                // this is a single tenant case, use the Puid value
+                principalId = token.Puid;
+            }
+            else
+            {
+                // this is a cross tenant case, parse and use the PUID from the AltSecId value
+                if (!string.IsNullOrEmpty(token.AltSecId))
+                {
+                    const string LiveIdPrefix = "1:live.com:";
+                    const string OrgIdPrefix = "5::";
+                    if (token.AltSecId.StartsWith(LiveIdPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        principalId = token.AltSecId.Substring(LiveIdPrefix.Length);
+                    }
+                    else if (token.AltSecId.StartsWith(OrgIdPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        principalId = token.AltSecId.Substring(OrgIdPrefix.Length);
+                    }
+                }
+            }
+
+            if (principalId == null)
+            {
+                throw new NotSupportedException("Unsupported JSON Web Token values.");
+            }
+
+            return principalId;
+        }
+
+        public class JsonWebToken
+        {
+            public string Iss { get; set; }
+
+            public string Idp { get; set; }
+
+            public string AltSecId { get; set; }
+
+            public string Puid { get; set; }
+
+            [Newtonsoft.Json.JsonProperty("oid")]
+            public string ObjectId { get; set; }
+
+            [Newtonsoft.Json.JsonProperty("tid")]
+            public string TenantId { get; set; }
+
+            [Newtonsoft.Json.JsonProperty("unique_name")]
+            public string UniqueName { get; set; }
         }
 
         private static void Add(this HttpRequestHeaders requestHeaders, string name, string value, Dictionary<string, List<string>> headers)

@@ -304,7 +304,7 @@ namespace ARMClient
 
         static void DumpClaims(string accessToken)
         {
-            PrintColoredJson(Utils.ParseClaims(accessToken));
+            PrintColoredJson(JObject.Parse(Utils.DecodeAccessToken(accessToken)));
             Console.WriteLine();
         }
 
